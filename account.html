@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lectern Account</title>
+<style>
+:root{--ink:#1a1f2c;--muted:#5b647a;--bg:#ffffff;--card:#f3f5f9;--line:#dde2ea;--accent:#2F5BEA;--danger:#D12F2F}
+@media (prefers-color-scheme:dark){:root{--ink:#e8ecf5;--muted:#a9b3cf;--bg:#0e1630;--card:#1a2547;--line:#2a3f86}}
+body{font:17px/1.6 -apple-system,system-ui,sans-serif;max-width:520px;margin:40px auto;padding:0 20px;color:var(--ink);background:var(--bg)}
+h1{font-size:28px;margin-bottom:4px}p.lead{color:var(--muted);margin-top:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-top:20px}
+button{font:inherit;font-weight:600;width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);cursor:pointer;margin-top:10px;background:#fff;color:#1f1f1f}
+button.apple{background:#000;color:#fff;border-color:#000}
+button.link{background:none;border:none;color:var(--accent);width:auto;padding:0}
+button.danger{background:none;color:var(--danger);border-color:var(--danger)}
+dl{margin:0}dt{color:var(--muted);font-size:14px;margin-top:10px}dd{margin:0;word-break:break-all}
+.note{color:var(--muted);font-size:14px}.error{color:var(--danger)}
+[hidden]{display:none!important}
+</style></head>
+<body>
+<h1>Lectern account</h1>
+<p class="lead">The same account you use in the Lectern app on iPad and iPhone.</p>
+
+<div id="unconfigured" class="card" hidden>
+  <p><b>Not set up yet.</b> Put your Supabase URL and anon key in <code>config.js</code>.</p>
+</div>
+
+<div id="signedOut" class="card" hidden>
+  <button class="apple" data-provider="apple">Sign in with Apple</button>
+  <div id="googleButton" style="display:flex;justify-content:center;margin-top:10px"></div>
+  <button data-provider="google" id="googleFallback">Continue with Google</button>
+  <p class="note">Your notes aren't stored here. They sync between your devices through your own iCloud.</p>
+</div>
+
+<div id="signedIn" class="card" hidden>
+  <dl>
+    <dt>Name</dt><dd id="name"></dd>
+    <dt>Email</dt><dd id="email"></dd>
+    <dt>Signed in with</dt><dd id="provider"></dd>
+    <dt>iCloud</dt><dd id="icloud"></dd>
+  </dl>
+  <button id="signOut">Sign out</button>
+  <button id="delete" class="danger">Delete account</button>
+</div>
+
+<p id="error" class="error" hidden></p>
+<p class="note"><a href="index.html">Home</a> · <a href="privacy.html">Privacy</a> · <a href="support.html">Support</a></p>
+
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://accounts.google.com/gsi/client" async></script>
+<script>
+const cfg = window.LECTERN_CONFIG || {};
+const $ = id => document.getElementById(id);
+const show = id => ["unconfigured", "signedOut", "signedIn"].forEach(x => $(x).hidden = x !== id);
+const fail = e => { $("error").textContent = e.message || String(e); $("error").hidden = false; };
+
+if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) {
+  show("unconfigured");
+} else {
+  const sb = supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+
+  document.querySelectorAll("[data-provider]").forEach(b => b.onclick = async () => {
+    const { error } = await sb.auth.signInWithOAuth({
+      provider: b.dataset.provider,
+      options: { redirectTo: location.origin + location.pathname }
+    });
+    if (error) fail(error);
+  });
+
+  // Google's own button: Google hands us an ID token, and Supabase signs in with it.
+  async function setUpGoogleButton() {
+    if (!cfg.googleClientId) return;
+    if (!(window.google && google.accounts && google.accounts.id)) return setTimeout(setUpGoogleButton, 200);
+    const raw = crypto.getRandomValues(new Uint8Array(32)).reduce((s, b) => s + b.toString(16).padStart(2, "0"), "");
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw))))
+      .map(b => b.toString(16).padStart(2, "0")).join("");
+    google.accounts.id.initialize({
+      client_id: cfg.googleClientId,
+      nonce: hash,
+      use_fedcm_for_prompt: true,
+      callback: async (response) => {
+        const { error } = await sb.auth.signInWithIdToken({ provider: "google", token: response.credential, nonce: raw });
+        if (error) fail(error);
+      }
+    });
+    google.accounts.id.renderButton($("googleButton"), { theme: "outline", size: "large", text: "continue_with", width: 320 });
+    $("googleFallback").hidden = true;
+  }
+  setUpGoogleButton();
+
+  $("signOut").onclick = async () => { await sb.auth.signOut(); };
+  $("delete").onclick = async () => {
+    if (!confirm("Delete your Lectern account for good? Your notes stay in iCloud and on your devices.")) return;
+    const { error } = await sb.rpc("delete_account");
+    if (error) return fail(error);
+    await sb.auth.signOut();
+  };
+
+  async function render(session) {
+    if (!session) return show("signedOut");
+    const u = session.user, m = u.user_metadata || {};
+    $("name").textContent = m.full_name || m.name || "—";
+    $("email").textContent = u.email || "—";
+    const p = (u.app_metadata || {}).provider || "";
+    $("provider").textContent = p === "apple" ? "Apple" : p === "google" ? "Google" : p;
+    const { data } = await sb.from("profiles").select("icloud_user_id, last_device").eq("id", u.id).maybeSingle();
+    $("icloud").textContent = data && data.icloud_user_id
+      ? "Linked" + (data.last_device ? " (last used on " + data.last_device + ")" : "")
+      : "Not linked yet. Open Lectern on your iPad or iPhone and sign in.";
+    show("signedIn");
+  }
+
+  sb.auth.onAuthStateChange((_event, session) => { setTimeout(() => render(session), 0); });
+}
+</script>
+</body></html>
